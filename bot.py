@@ -1,7 +1,8 @@
 import yfinance as yf
 import pandas as pd
 from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
+from ta.trend import EMAIndicator, MACD
+from ta.volatility import BollingerBands
 import asyncio
 from telegram import Bot
 import schedule
@@ -11,14 +12,14 @@ from datetime import datetime
 # ================================
 # CONFIGURAZIONE — MODIFICA QUI
 # ================================
-TELEGRAM_TOKEN = "8974017579:AAHJ-tyIjPrd6Haf9-Pe62QWlS5PUc6IGVI"
+TELEGRAM_TOKEN = "8974017579:AAEU-ZSxhdcono0qgBYQhEPPeMMs2hRELf4"
 CHAT_ID = "520150144"
 
 TITOLI = {
     "Tech / Nasdaq": [
         "NVDA", "AAPL", "MSFT", "META", "AMD", "GOOGL", "AMZN", "TSLA",
         "SMCI", "PLTR", "INTC", "QCOM", "AVGO", "NFLX", "PYPL",
-        "ADBE", "CRM", "NOW", "PANW"
+        "ADBE", "CRM", "NOW", "PANW", "SPCX"
     ],
     "Energia": [
         "XOM", "CVX", "SLB", "EOG", "COP"
@@ -37,33 +38,72 @@ async def manda_messaggio(testo):
     bot = Bot(token=TELEGRAM_TOKEN)
     await bot.send_message(chat_id=CHAT_ID, text=testo)
 
-def analizza(ticker):
+def analizza(ticker, completo=False):
     try:
         dati = yf.download(ticker, period="6mo", interval="1d", progress=False)
-        if dati.empty or len(dati) < 50:
+        if dati.empty or len(dati) < 26:
             return None
 
         close = dati["Close"].squeeze()
-
-        rsi = RSIIndicator(close).rsi().iloc[-1]
-        ema50 = EMAIndicator(close, window=50).ema_indicator().iloc[-1]
-        ema200 = EMAIndicator(close, window=200).ema_indicator().iloc[-1]
         prezzo = close.iloc[-1]
 
+        # RSI
+        rsi = RSIIndicator(close).rsi().iloc[-1]
+
+        # EMA
+        ema50 = EMAIndicator(close, window=50).ema_indicator().iloc[-1] if len(dati) >= 50 else None
+        ema200 = EMAIndicator(close, window=200).ema_indicator().iloc[-1] if len(dati) >= 200 else None
+
+        # MACD
+        macd_obj = MACD(close)
+        macd_diff = macd_obj.macd_diff().iloc[-1]  # positivo = rialzista
+
+        # Bande di Bollinger
+        bb = BollingerBands(close)
+        bb_high = bb.bollinger_hband().iloc[-1]
+        bb_low = bb.bollinger_lband().iloc[-1]
+        bb_segnale = ""
+        if prezzo < bb_low:
+            bb_segnale = "⬇️ Sotto banda bassa"
+        elif prezzo > bb_high:
+            bb_segnale = "⬆️ Sopra banda alta"
+
+        # Trend EMA
+        if ema50 and ema200:
+            trend = "✅ Rialzista" if ema50 > ema200 else "❌ Ribassista"
+        else:
+            trend = "⏳ Dati insufficienti"
+
+        # Riepilogo completo (per messaggio serale)
+        if completo:
+            return (
+                f"📊 {ticker}\n"
+                f"Prezzo: ${prezzo:.2f}\n"
+                f"RSI: {rsi:.1f} | MACD: {'🟢' if macd_diff > 0 else '🔴'}\n"
+                f"Trend: {trend}\n"
+                f"Bollinger: {bb_segnale if bb_segnale else '➡️ Nella banda'}"
+            )
+
+        # Logica segnali
         segnale = None
-        if rsi < 30 and ema50 > ema200:
+        if rsi < 30 and macd_diff > 0 and (ema50 and ema200 and ema50 > ema200):
             segnale = "📈 SEGNALE BUY"
-        elif rsi > 70 and ema50 < ema200:
+        elif rsi > 70 and macd_diff < 0 and (ema50 and ema200 and ema50 < ema200):
             segnale = "📉 SEGNALE SELL"
+        elif prezzo < bb_low and rsi < 35:
+            segnale = "📈 SEGNALE BUY (Bollinger)"
+        elif prezzo > bb_high and rsi > 65:
+            segnale = "📉 SEGNALE SELL (Bollinger)"
 
         if segnale:
-            trend = "✅ Rialzista" if ema50 > ema200 else "❌ Ribassista"
             return (
                 f"{segnale} — {ticker}\n"
                 f"Prezzo: ${prezzo:.2f}\n"
-                f"RSI(14): {rsi:.1f}\n"
-                f"Trend EMA50/200: {trend}"
+                f"RSI: {rsi:.1f} | MACD: {'🟢' if macd_diff > 0 else '🔴'}\n"
+                f"Trend EMA: {trend}\n"
+                f"Bollinger: {bb_segnale if bb_segnale else '➡️ Nella banda'}"
             )
+
     except Exception:
         pass
     return None
@@ -71,7 +111,6 @@ def analizza(ticker):
 def controlla_mercato():
     ora = datetime.now().strftime("%H:%M")
     print(f"Controllo mercato in corso alle {ora}...")
-
     messaggi = []
 
     for settore, tickers in TITOLI.items():
@@ -92,13 +131,40 @@ def controlla_mercato():
     asyncio.run(manda_messaggio(testo))
     print("Messaggio inviato!")
 
-# Orari di controllo (ora italiana, durante borsa USA)
+def riepilogo_serale():
+    ora = datetime.now().strftime("%H:%M")
+    print(f"Riepilogo serale in corso alle {ora}...")
+    righe = [f"📋 RIEPILOGO SERALE — {ora}\n"]
+
+    for settore, tickers in TITOLI.items():
+        righe.append(f"\n── {settore} ──")
+        for ticker in tickers:
+            risultato = analizza(ticker, completo=True)
+            if risultato:
+                righe.append(risultato)
+            else:
+                righe.append(f"⏳ {ticker} — dati non disponibili")
+
+    testo = "\n\n".join(righe)
+
+    # Telegram ha un limite di 4096 caratteri, dividiamo se necessario
+    if len(testo) > 4000:
+        meta = len(testo) // 2
+        asyncio.run(manda_messaggio(testo[:meta]))
+        asyncio.run(manda_messaggio(testo[meta:]))
+    else:
+        asyncio.run(manda_messaggio(testo))
+
+    print("Riepilogo serale inviato!")
+
+# Orari di controllo (ora italiana)
 schedule.every().day.at("15:30").do(controlla_mercato)
 schedule.every().day.at("17:30").do(controlla_mercato)
 schedule.every().day.at("19:30").do(controlla_mercato)
 schedule.every().day.at("21:30").do(controlla_mercato)
+schedule.every().day.at("22:00").do(riepilogo_serale)
 
-print("Bot avviato! Controlli alle 15:30 / 17:30 / 19:30 / 21:30 (ora italiana)")
+print("Bot avviato! Controlli alle 15:30 / 17:30 / 19:30 / 21:30 + riepilogo alle 22:00")
 controlla_mercato()  # Test immediato all'avvio
 
 while True:
